@@ -12,20 +12,20 @@ class UsersSeeder extends Seeder
     public function run(): void
     {
         // Create a teacher
-        $teacher = User::create([
-            'name' => 'Teacher',
-            'email' => 'teacher@example.com',
-            'password' => Hash::make('password'),
-        ]);
+        // $teacher = User::create([
+        //     'name' => 'Teacher',
+        //     'email' => 'teacher@example.com',
+        //     'password' => Hash::make('password'),
+        // ]);
 
-        $teacherRole = Role::where('slug', 'teacher')->first();
-        $teacher->roles()->attach($teacherRole);
+        // $teacherRole = Role::where('slug', 'teacher')->first();
+        // $teacher->roles()->attach($teacherRole);
 
         // Create a student
         $student = User::create([
-            'name' => 'Student',
-            'email' => 'student@example.com',
-            'password' => Hash::make('password'),
+                'name' => 'Alice Smith',
+                'email' => 'alice.student@bisindo.com',
+                'password' => Hash::make('password'),   
         ]);
 
         $studentRole = Role::where('slug', 'student')->first();

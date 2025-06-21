@@ -4,7 +4,6 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Support\Facades\Storage;
 
 class Exercise extends Model
 {
@@ -13,14 +12,13 @@ class Exercise extends Model
     protected $fillable = [
         'title',
         'description',
-        'video_path',
         'material_id',
         'created_by',
         'difficulty_level',
         'is_published',
     ];
 
-    protected $appends = ['video_url', 'stream_url'];
+    protected $appends = ['total_questions', 'total_points'];
 
     public function material()
     {
@@ -32,56 +30,37 @@ class Exercise extends Model
         return $this->belongsTo(User::class, 'created_by');
     }
 
+    public function questions()
+    {
+        return $this->hasMany(ExerciseQuestion::class)->orderBy('order');
+    }
+
     public function progress()
     {
         return $this->hasMany(StudentProgress::class);
     }
 
-    public function getVideoUrlAttribute()
+    // Accessor untuk total questions
+    public function getTotalQuestionsAttribute()
     {
-        if ($this->video_path) {
-            return asset('storage/' . str_replace('public/', '', $this->video_path));
-        }
-        return null;
+        return $this->questions()->count();
     }
 
-    public function getStreamUrlAttribute()
+    // Accessor untuk total points
+    public function getTotalPointsAttribute()
     {
-        if ($this->video_path) {
-            return route('api.exercises.stream', ['id' => $this->id]);
-        }
-        return null;
+        return $this->questions()->sum('points');
     }
 
-    public function getVideoInfoAttribute()
+    // Scope untuk published exercises
+    public function scopePublished($query)
     {
-        if (!$this->video_path) {
-            return null;
-        }
-
-        // Ekstrak informasi dari path
-        $extension = pathinfo($this->video_path, PATHINFO_EXTENSION);
-        $mimeType = $this->getMimeTypeFromExtension($extension);
-
-        return [
-            'filename' => basename($this->video_path),
-            'type' => $mimeType,
-            'size' => Storage::exists($this->video_path) ? Storage::size($this->video_path) : 0,
-            'url' => $this->video_url,
-            'stream_url' => $this->stream_url,
-        ];
+        return $query->where('is_published', true);
     }
 
-    private function getMimeTypeFromExtension($extension)
+    // Scope untuk exercises by creator
+    public function scopeByCreator($query, $userId)
     {
-        $mimeTypes = [
-            'mp4' => 'video/mp4',
-            'mov' => 'video/quicktime',
-            'avi' => 'video/x-msvideo',
-            'wmv' => 'video/x-ms-wmv',
-            'webm' => 'video/webm',
-        ];
-
-        return $mimeTypes[strtolower($extension)] ?? 'video/mp4';
+        return $query->where('created_by', $userId);
     }
 }

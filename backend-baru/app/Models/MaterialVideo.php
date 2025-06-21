@@ -20,7 +20,7 @@ class MaterialVideo extends Model
         'order',
     ];
 
-    protected $appends = ['video_url', 'stream_url'];
+    protected $appends = ['video_url', 'stream_url', 'direct_url'];
 
     public function material()
     {
@@ -35,6 +35,7 @@ class MaterialVideo extends Model
     public function getVideoUrlAttribute()
     {
         if ($this->video_path) {
+            // TIDAK PERLU DIUBAH - tetap menggunakan asset() yang akan di-intercept oleh web route
             return asset('storage/' . str_replace('public/', '', $this->video_path));
         }
 
@@ -51,6 +52,12 @@ class MaterialVideo extends Model
         }
 
         return null;
+    }
+
+    public function getDirectUrlAttribute()
+    {
+        // Tambahan: Direct URL yang sama dengan video_url untuk compatibility
+        return $this->video_url;
     }
 
     public function getVideoInfoAttribute()

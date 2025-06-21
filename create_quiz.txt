@@ -47,49 +47,19 @@ class QuizController extends Controller
             $query->where('title', 'like', '%' . $request->search . '%');
         }
 
-        $quizzes = $query->latest()->get();
+        $quizzes = $query->latest()->paginate(10);
 
         // If user is a student, add progress information
         if ($request->user()->isStudent()) {
             $quizzes->each(function ($quiz) use ($request) {
-                // Get user progress
                 $progress = StudentProgress::where('user_id', $request->user()->id)
                     ->where('quiz_id', $quiz->id)
-                    ->where('progress_type', 'quiz')
-                    ->latest()
                     ->first();
-
-                $quiz->attempt_count = StudentProgress::where('user_id', $request->user()->id)
-                    ->where('quiz_id', $quiz->id)
-                    ->where('progress_type', 'quiz')
-                    ->count();
 
                 $quiz->is_completed = $progress ? $progress->is_completed : false;
-                $quiz->best_score = $progress ? $progress->score : null;
-                $quiz->can_attempt = true; // Allow unlimited attempts for now
-
-                if ($progress) {
-                    $quiz->last_attempt_at = $progress->completed_at;
-                    $quiz->score = $progress->score;
-                }
-
-                // Check for active attempt
-                $activeAttempt = StudentProgress::where('user_id', $request->user()->id)
-                    ->where('quiz_id', $quiz->id)
-                    ->where('progress_type', 'quiz')
-                    ->where('is_completed', false)
-                    ->whereNotNull('started_at')
-                    ->first();
-
-                if ($activeAttempt) {
-                    $quiz->has_active_attempt = true;
-                    $quiz->remaining_time = $this->getRemainingTime($activeAttempt, $quiz->time_limit);
-                    $quiz->is_time_exceeded = $this->isTimeExceeded($activeAttempt, $quiz->time_limit);
-                } else {
-                    $quiz->has_active_attempt = false;
-                    $quiz->remaining_time = $quiz->time_limit ? $quiz->time_limit * 60 : null;
-                    $quiz->is_time_exceeded = false;
-                }
+                $quiz->score = $progress ? $progress->score : null;
+                $quiz->attempt_count = $progress ? $progress->attempt_count : 0;
+                $quiz->passed = $progress ? ($progress->score >= $quiz->passing_score) : false;
             });
         }
 
@@ -196,19 +166,12 @@ class QuizController extends Controller
                 }
             }
 
-            // Update quiz totals
-            $this->updateQuizTotals($quiz);
-
             DB::commit();
 
             // Load relationships for response
             $quiz->load(['questions.options', 'questions.materialVideo', 'material', 'creator']);
 
-            return response()->json([
-                'data' => $quiz,
-                'message' => 'Quiz created successfully',
-                'id' => $quiz->id
-            ], 201);
+            return response()->json($quiz, 201);
 
         } catch (\Exception $e) {
             DB::rollback();
@@ -240,63 +203,14 @@ class QuizController extends Controller
 
         // If user is a student, add progress information and hide correct answers
         if ($request->user()->isStudent()) {
-            // Get user progress
             $progress = StudentProgress::where('user_id', $request->user()->id)
-                ->where('quiz_id', $id)
-                ->where('progress_type', 'quiz')
-                ->latest()
+                ->where('quiz_id', $quiz->id)
                 ->first();
-
-            $quiz->attempt_count = StudentProgress::where('user_id', $request->user()->id)
-                ->where('quiz_id', $id)
-                ->where('progress_type', 'quiz')
-                ->count();
 
             $quiz->is_completed = $progress ? $progress->is_completed : false;
-            $quiz->best_score = $progress ? $progress->score : null;
-            $quiz->can_attempt = true;
-
-            if ($progress) {
-                $quiz->last_attempt_at = $progress->completed_at;
-                $quiz->score = $progress->score;
-            }
-
-            // Get user's attempts history
-            $quiz->attempts = StudentProgress::where('user_id', $request->user()->id)
-                ->where('quiz_id', $id)
-                ->where('progress_type', 'quiz')
-                ->where('is_completed', true)
-                ->orderBy('completed_at', 'desc')
-                ->get()
-                ->map(function ($attempt) {
-                    return [
-                        'id' => $attempt->id,
-                        'score' => $attempt->score,
-                        'total_points' => $attempt->max_score,
-                        'percentage' => $attempt->max_score > 0 ? round(($attempt->score / $attempt->max_score) * 100, 2) : 0,
-                        'completed_at' => $attempt->completed_at,
-                        'time_taken' => $attempt->time_taken,
-                    ];
-                });
-
-            // Check for active attempt
-            $activeAttempt = StudentProgress::where('user_id', $request->user()->id)
-                ->where('quiz_id', $id)
-                ->where('progress_type', 'quiz')
-                ->where('is_completed', false)
-                ->whereNotNull('started_at')
-                ->first();
-
-            if ($activeAttempt) {
-                $quiz->has_active_attempt = true;
-                $quiz->remaining_time = $this->getRemainingTime($activeAttempt, $quiz->time_limit);
-                $quiz->is_time_exceeded = $this->isTimeExceeded($activeAttempt, $quiz->time_limit);
-                $quiz->active_attempt_started_at = $activeAttempt->started_at;
-            } else {
-                $quiz->has_active_attempt = false;
-                $quiz->remaining_time = $quiz->time_limit ? $quiz->time_limit * 60 : null;
-                $quiz->is_time_exceeded = false;
-            }
+            $quiz->score = $progress ? $progress->score : null;
+            $quiz->attempt_count = $progress ? $progress->attempt_count : 0;
+            $quiz->passed = $progress ? ($progress->score >= $quiz->passing_score) : false;
 
             // Hide correct answers from students
             $quiz->questions->each(function ($question) {
@@ -380,18 +294,12 @@ class QuizController extends Controller
                 }
             }
 
-            // Update quiz totals
-            $this->updateQuizTotals($quiz);
-
             DB::commit();
 
             // Load relationships for response
             $quiz->load(['questions.options', 'questions.materialVideo', 'material', 'creator']);
 
-            return response()->json([
-                'data' => $quiz,
-                'message' => 'Quiz updated successfully'
-            ]);
+            return response()->json($quiz);
 
         } catch (\Exception $e) {
             DB::rollback();
@@ -415,310 +323,6 @@ class QuizController extends Controller
         $quiz->delete(); // Cascade will handle questions and options
 
         return response()->json(['message' => 'Quiz deleted successfully']);
-    }
-
-    /**
-     * Start a new quiz attempt (Student functionality)
-     */
-    public function startAttempt(Request $request, $id)
-    {
-        try {
-            Log::info('=== QUIZ START ATTEMPT ===', [
-                'quiz_id' => $id,
-                'user_id' => $request->user()->id,
-                'user_role' => $request->user()->getRoleSlugs()
-            ]);
-
-            // Check if user is a student
-            if (!$request->user()->isStudent()) {
-                return response()->json(['message' => 'Unauthorized'], 403);
-            }
-
-            $quiz = Quiz::with(['questions.options', 'questions.materialVideo'])->findOrFail($id);
-
-            // Check if quiz is published
-            if (!$quiz->is_published) {
-                return response()->json([
-                    'error' => 'Quiz not available',
-                    'message' => 'This quiz is not published yet.'
-                ], 403);
-            }
-
-            // Check if there's already an active attempt
-            $activeAttempt = StudentProgress::where('user_id', $request->user()->id)
-                ->where('quiz_id', $id)
-                ->where('progress_type', 'quiz')
-                ->where('is_completed', false)
-                ->whereNotNull('started_at')
-                ->first();
-
-            if ($activeAttempt) {
-                // Check if time exceeded
-                if ($quiz->time_limit && $this->isTimeExceeded($activeAttempt, $quiz->time_limit)) {
-                    // Auto-submit the expired attempt
-                    $this->autoSubmitExpiredAttempt($activeAttempt, $quiz);
-
-                    return response()->json([
-                        'error' => 'Previous attempt expired',
-                        'message' => 'Your previous attempt has expired and was automatically submitted.',
-                        'can_start_new' => true
-                    ], 400);
-                }
-
-                // Return existing attempt
-                Log::info('Continuing existing attempt', ['attempt_id' => $activeAttempt->id]);
-                return response()->json([
-                    'message' => 'Continuing existing attempt',
-                    'quiz' => $quiz,
-                    'remaining_time' => $this->getRemainingTime($activeAttempt, $quiz->time_limit),
-                    'started_at' => $activeAttempt->started_at,
-                ]);
-            }
-
-            // Get current attempt count
-            $currentAttemptCount = StudentProgress::where('user_id', $request->user()->id)
-                ->where('quiz_id', $id)
-                ->where('progress_type', 'quiz')
-                ->count();
-
-            // Create new attempt
-            $progress = StudentProgress::create([
-                'user_id' => $request->user()->id,
-                'quiz_id' => $quiz->id,
-                'progress_type' => 'quiz',
-                'score' => 0,
-                'max_score' => $quiz->total_points,
-                'attempt_count' => $currentAttemptCount + 1,
-                'started_at' => now(),
-                'is_completed' => false,
-            ]);
-
-            Log::info('New quiz attempt created', [
-                'progress_id' => $progress->id,
-                'attempt_count' => $progress->attempt_count
-            ]);
-
-            return response()->json([
-                'message' => 'Quiz attempt started successfully',
-                'quiz' => $quiz,
-                'remaining_time' => $quiz->time_limit ? $quiz->time_limit * 60 : null,
-                'started_at' => $progress->started_at,
-            ]);
-        } catch (\Exception $e) {
-            Log::error('Error starting quiz attempt: ' . $e->getMessage(), [
-                'quiz_id' => $id,
-                'user_id' => $request->user()->id,
-                'trace' => $e->getTraceAsString()
-            ]);
-            return response()->json([
-                'error' => 'Failed to start quiz attempt',
-                'message' => $e->getMessage()
-            ], 500);
-        }
-    }
-
-    /**
-     * MAIN SUBMISSION METHOD - handles both /submit and /submit-answers endpoints
-     */
-    public function submitAnswers(Request $request, $id)
-    {
-        try {
-            Log::info('=== QUIZ SUBMIT ANSWERS ===', [
-                'quiz_id' => $id,
-                'user_id' => $request->user()->id,
-                'endpoint' => $request->path(),
-                'request_data' => $request->all()
-            ]);
-
-            // Check if user is a student
-            if (!$request->user()->isStudent()) {
-                return response()->json(['message' => 'Unauthorized'], 403);
-            }
-
-            $quiz = Quiz::with('questions.options')->findOrFail($id);
-
-            // Check if quiz is published
-            if (!$quiz->is_published) {
-                return response()->json(['message' => 'Quiz not available'], 403);
-            }
-
-            // Get active attempt
-            $activeAttempt = StudentProgress::where('user_id', $request->user()->id)
-                ->where('quiz_id', $id)
-                ->where('progress_type', 'quiz')
-                ->where('is_completed', false)
-                ->whereNotNull('started_at')
-                ->first();
-
-            if (!$activeAttempt) {
-                Log::error('No active attempt found', [
-                    'quiz_id' => $id,
-                    'user_id' => $request->user()->id
-                ]);
-                return response()->json([
-                    'error' => 'No active attempt found',
-                    'message' => 'Please start the quiz first.'
-                ], 400);
-            }
-
-            // Check if time exceeded (unless it's auto-submit)
-            $isAutoSubmit = $request->input('auto_submit', false);
-            if (!$isAutoSubmit && $quiz->time_limit && $this->isTimeExceeded($activeAttempt, $quiz->time_limit)) {
-                return response()->json([
-                    'error' => 'Time exceeded',
-                    'message' => 'Time limit has been exceeded for this quiz.'
-                ], 400);
-            }
-
-            $validator = Validator::make($request->all(), [
-                'answers' => 'required|array',
-                'answers.*' => 'required|integer|exists:quiz_options,id',
-                'auto_submit' => 'boolean',
-            ]);
-
-            if ($validator->fails()) {
-                Log::error('Validation failed', ['errors' => $validator->errors()]);
-                return response()->json([
-                    'error' => 'Invalid submission data',
-                    'errors' => $validator->errors()
-                ], 422);
-            }
-
-            DB::beginTransaction();
-
-            $totalScore = 0;
-            $maxScore = $quiz->total_points;
-            $correctAnswers = 0;
-            $totalQuestions = $quiz->total_questions;
-
-            // Prepare answers detail for JSON storage
-            $answersDetail = [];
-
-            Log::info('Processing answers', [
-                'answers_count' => count($request->answers),
-                'quiz_questions_count' => $quiz->questions->count()
-            ]);
-
-            // Calculate score
-            foreach ($request->answers as $questionId => $selectedOptionId) {
-                $question = $quiz->questions->find($questionId);
-                if ($question) {
-                    $selectedOption = $question->options->find($selectedOptionId);
-                    if ($selectedOption) {
-                        $isCorrect = $selectedOption->is_correct;
-                        $pointsEarned = $isCorrect ? $question->points : 0;
-
-                        $totalScore += $pointsEarned;
-                        if ($isCorrect) {
-                            $correctAnswers++;
-                        }
-
-                        // Store answer detail
-                        $answersDetail[$questionId] = [
-                            'selected_option_id' => $selectedOptionId,
-                            'is_correct' => $isCorrect,
-                            'points_earned' => $pointsEarned,
-                            'answered_at' => now()->toISOString(),
-                        ];
-
-                        Log::info('Answer processed', [
-                            'question_id' => $questionId,
-                            'selected_option_id' => $selectedOptionId,
-                            'is_correct' => $isCorrect,
-                            'points_earned' => $pointsEarned
-                        ]);
-                    } else {
-                        Log::warning('Selected option not found', [
-                            'question_id' => $questionId,
-                            'selected_option_id' => $selectedOptionId
-                        ]);
-                    }
-                } else {
-                    Log::warning('Question not found', ['question_id' => $questionId]);
-                }
-            }
-
-            $percentage = $maxScore > 0 ? ($totalScore / $maxScore) * 100 : 0;
-            $passed = $percentage >= $quiz->passing_score;
-
-            // Calculate time taken
-            $timeTaken = null;
-            if ($activeAttempt->started_at) {
-                $timeTaken = now()->diffInSeconds($activeAttempt->started_at);
-            }
-
-            Log::info('Quiz results calculated', [
-                'total_score' => $totalScore,
-                'max_score' => $maxScore,
-                'percentage' => $percentage,
-                'passed' => $passed,
-                'correct_answers' => $correctAnswers,
-                'time_taken' => $timeTaken
-            ]);
-
-            // Update progress
-            $activeAttempt->update([
-                'score' => $totalScore,
-                'max_score' => $maxScore,
-                'answers_detail' => $answersDetail,
-                'is_completed' => true,
-                'completed_at' => now(),
-                'time_taken' => $timeTaken,
-            ]);
-
-            DB::commit();
-
-            // Determine message based on performance
-            $message = $passed ? 'Selamat! Anda lulus quiz ini.' : 'Anda belum lulus quiz ini. Coba lagi!';
-            if ($isAutoSubmit) {
-                $message = 'Quiz telah otomatis dikirim karena waktu habis. ' . $message;
-            }
-
-            $response = [
-                'message' => $message,
-                'score' => $totalScore,
-                'max_score' => $maxScore,
-                'percentage' => round($percentage, 2),
-                'passing_score' => $quiz->passing_score,
-                'passed' => $passed,
-                'correct_answers' => $correctAnswers,
-                'total_questions' => $totalQuestions,
-                'time_taken' => $timeTaken,
-                'formatted_time_taken' => $this->formatTime($timeTaken),
-                'auto_submitted' => $isAutoSubmit,
-            ];
-
-            Log::info('Quiz submission successful', $response);
-
-            return response()->json($response);
-
-        } catch (\Exception $e) {
-            DB::rollback();
-            Log::error('Quiz submission error: ' . $e->getMessage(), [
-                'quiz_id' => $id,
-                'user_id' => $request->user()->id,
-                'trace' => $e->getTraceAsString()
-            ]);
-
-            return response()->json([
-                'error' => 'Failed to submit quiz answers',
-                'message' => $e->getMessage()
-            ], 500);
-        }
-    }
-
-    /**
-     * LEGACY METHOD - for backward compatibility
-     * Redirects to submitAnswers method
-     */
-    public function submitQuiz(Request $request, $id)
-    {
-        Log::info('Legacy submitQuiz method called, redirecting to submitAnswers', [
-            'quiz_id' => $id,
-            'user_id' => $request->user()->id
-        ]);
-
-        return $this->submitAnswers($request, $id);
     }
 
     /**
@@ -847,6 +451,107 @@ class QuizController extends Controller
     }
 
     /**
+     * Submit all answers at once (traditional method)
+     */
+    public function submitAnswers(Request $request, $id)
+    {
+        // Check if user is a student
+        if (!$request->user()->isStudent()) {
+            return response()->json(['message' => 'Unauthorized'], 403);
+        }
+
+        $quiz = Quiz::with('questions.options')->findOrFail($id);
+
+        // Check if quiz is published
+        if (!$quiz->is_published) {
+            return response()->json(['message' => 'Quiz not available'], 403);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'answers' => 'required|array',
+            'answers.*' => 'required|integer|exists:quiz_options,id',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        try {
+            DB::beginTransaction();
+
+            $totalScore = 0;
+            $maxScore = $quiz->total_points;
+            $correctAnswers = 0;
+            $totalQuestions = $quiz->total_questions;
+
+            // Prepare answers detail for JSON storage
+            $answersDetail = [];
+
+            // Calculate score
+            foreach ($request->answers as $questionId => $selectedOptionId) {
+                $question = $quiz->questions->find($questionId);
+                if ($question) {
+                    $selectedOption = $question->options->find($selectedOptionId);
+                    if ($selectedOption) {
+                        $isCorrect = $selectedOption->is_correct;
+                        $pointsEarned = $isCorrect ? $question->points : 0;
+
+                        $totalScore += $pointsEarned;
+                        if ($isCorrect) {
+                            $correctAnswers++;
+                        }
+
+                        // Store answer detail
+                        $answersDetail[$questionId] = [
+                            'selected_option_id' => $selectedOptionId,
+                            'is_correct' => $isCorrect,
+                            'points_earned' => $pointsEarned,
+                            'answered_at' => now()->toISOString(),
+                        ];
+                    }
+                }
+            }
+
+            $passed = $totalScore >= $quiz->passing_score;
+
+            // Update or create progress
+            $progress = StudentProgress::updateOrCreate(
+                [
+                    'user_id' => $request->user()->id,
+                    'quiz_id' => $id,
+                    'progress_type' => 'quiz',
+                ],
+                [
+                    'score' => $totalScore,
+                    'max_score' => $maxScore,
+                    'answers_detail' => $answersDetail,
+                    'is_completed' => true,
+                    'completed_at' => now(),
+                    'attempt_count' => DB::raw('COALESCE(attempt_count, 0) + 1'),
+                ]
+            );
+
+            DB::commit();
+
+            return response()->json([
+                'message' => 'Quiz completed successfully',
+                'score' => $totalScore,
+                'max_score' => $maxScore,
+                'percentage' => round(($totalScore / $maxScore) * 100, 2),
+                'passing_score' => $quiz->passing_score,
+                'passed' => $passed,
+                'correct_answers' => $correctAnswers,
+                'total_questions' => $totalQuestions,
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollback();
+            Log::error('Quiz submission error: ' . $e->getMessage());
+            return response()->json(['error' => 'Submission failed'], 500);
+        }
+    }
+
+    /**
      * Get student's current progress in quiz
      */
     public function getProgress(Request $request, $quizId)
@@ -914,8 +619,7 @@ class QuizController extends Controller
                 'answers_detail' => null,
                 'is_completed' => false,
                 'completed_at' => null,
-                'started_at' => null,
-                'time_taken' => null,
+                'started_at' => now(),
             ]);
         }
 
@@ -1012,104 +716,6 @@ class QuizController extends Controller
 
             fclose($handle);
         }, 206, $headers);
-    }
-
-    // ========== HELPER METHODS ==========
-
-    /**
-     * Update quiz totals
-     */
-    private function updateQuizTotals($quiz)
-    {
-        $totalQuestions = $quiz->questions()->count();
-        $totalPoints = $quiz->questions()->sum('points');
-
-        $quiz->update([
-            'total_questions' => $totalQuestions,
-            'total_points' => $totalPoints,
-        ]);
-    }
-
-    /**
-     * Auto-submit expired attempt
-     */
-    private function autoSubmitExpiredAttempt($attempt, $quiz)
-    {
-        try {
-            DB::beginTransaction();
-
-            $answers = $attempt->answers_detail ?? [];
-            $totalScore = collect($answers)->sum('points_earned');
-            $timeTaken = $attempt->started_at ? now()->diffInSeconds($attempt->started_at) : null;
-
-            $attempt->update([
-                'score' => $totalScore,
-                'is_completed' => true,
-                'completed_at' => now(),
-                'time_taken' => $timeTaken,
-            ]);
-
-            DB::commit();
-
-            Log::info('Auto-submitted expired quiz attempt', [
-                'attempt_id' => $attempt->id,
-                'quiz_id' => $quiz->id,
-                'user_id' => $attempt->user_id,
-                'score' => $totalScore,
-                'time_taken' => $timeTaken
-            ]);
-
-        } catch (\Exception $e) {
-            DB::rollback();
-            Log::error('Error auto-submitting expired attempt: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Check if time exceeded
-     */
-    private function isTimeExceeded($attempt, $timeLimit)
-    {
-        if (!$attempt->started_at || !$timeLimit) {
-            return false;
-        }
-
-        $timeElapsed = now()->diffInMinutes($attempt->started_at);
-        return $timeElapsed > $timeLimit;
-    }
-
-    /**
-     * Get remaining time in seconds
-     */
-    private function getRemainingTime($attempt, $timeLimit)
-    {
-        if (!$attempt->started_at || !$timeLimit) {
-            return null;
-        }
-
-        $timeElapsed = now()->diffInSeconds($attempt->started_at);
-        $totalTimeInSeconds = $timeLimit * 60;
-        $remainingTime = $totalTimeInSeconds - $timeElapsed;
-
-        return max(0, $remainingTime);
-    }
-
-    /**
-     * Format time in seconds to human readable format
-     */
-    private function formatTime($seconds)
-    {
-        if (!$seconds) return null;
-
-        $hours = floor($seconds / 3600);
-        $minutes = floor(($seconds % 3600) / 60);
-        $secs = $seconds % 60;
-
-        if ($hours > 0) {
-            return sprintf('%02d:%02d:%02d', $hours, $minutes, $secs);
-        } else {
-            return sprintf('%02d:%02d', $minutes, $secs);
-        }
     }
 
     /**

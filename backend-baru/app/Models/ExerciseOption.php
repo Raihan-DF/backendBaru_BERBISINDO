@@ -5,15 +5,15 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
-class QuizOption extends Model
+class ExerciseOption extends Model
 {
     use HasFactory;
 
     protected $fillable = [
-        'quiz_question_id',
+        'exercise_question_id',
         'option_text',
         'is_correct',
-        'order', // Tambahkan order field
+        'order',
     ];
 
     protected $casts = [
@@ -22,6 +22,12 @@ class QuizOption extends Model
 
     public function question()
     {
-        return $this->belongsTo(QuizQuestion::class, 'quiz_question_id');
+        return $this->belongsTo(ExerciseQuestion::class, 'exercise_question_id');
+    }
+
+    // Scope untuk correct options
+    public function scopeCorrect($query)
+    {
+        return $query->where('is_correct', true);
     }
 }

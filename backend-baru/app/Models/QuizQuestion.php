@@ -4,7 +4,6 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Support\Facades\Storage;
 
 class QuizQuestion extends Model
 {
@@ -12,75 +11,60 @@ class QuizQuestion extends Model
 
     protected $fillable = [
         'quiz_id',
+        'material_video_id',
         'question',
         'question_type',
-        'video_path',
         'points',
         'order',
     ];
 
-    protected $appends = ['video_url', 'stream_url'];
+    protected $with = ['materialVideo', 'options'];
 
     public function quiz()
     {
         return $this->belongsTo(Quiz::class);
     }
 
+    public function materialVideo()
+    {
+        return $this->belongsTo(MaterialVideo::class);
+    }
+
     public function options()
     {
-        return $this->hasMany(QuizOption::class);
+        return $this->hasMany(QuizOption::class)->orderBy('order');
     }
 
     public function correctOption()
     {
+        return $this->hasOne(QuizOption::class)->where('is_correct', true);
+    }
+
+    // Get correct option
+    public function getCorrectOption()
+    {
         return $this->options()->where('is_correct', true)->first();
+    }
+
+    // Check if has correct option
+    public function hasCorrectOption()
+    {
+        return $this->options()->where('is_correct', true)->exists();
+    }
+
+    // Accessor untuk video info dari MaterialVideo
+    public function getVideoInfoAttribute()
+    {
+        return $this->materialVideo ? $this->materialVideo->video_info : null;
     }
 
     public function getVideoUrlAttribute()
     {
-        if ($this->video_path) {
-            return asset('storage/' . str_replace('public/', '', $this->video_path));
-        }
-        return null;
+        return $this->materialVideo ? $this->materialVideo->video_url : null;
     }
 
     public function getStreamUrlAttribute()
     {
-        if ($this->video_path) {
-            return route('api.quiz.questions.stream', ['id' => $this->quiz_id, 'questionId' => $this->id]);
-        }
-        return null;
-    }
-
-    public function getVideoInfoAttribute()
-    {
-        if (!$this->video_path) {
-            return null;
-        }
-
-        // Ekstrak informasi dari path
-        $extension = pathinfo($this->video_path, PATHINFO_EXTENSION);
-        $mimeType = $this->getMimeTypeFromExtension($extension);
-
-        return [
-            'filename' => basename($this->video_path),
-            'type' => $mimeType,
-            'size' => Storage::exists($this->video_path) ? Storage::size($this->video_path) : 0,
-            'url' => $this->video_url,
-            'stream_url' => $this->stream_url,
-        ];
-    }
-
-    private function getMimeTypeFromExtension($extension)
-    {
-        $mimeTypes = [
-            'mp4' => 'video/mp4',
-            'mov' => 'video/quicktime',
-            'avi' => 'video/x-msvideo',
-            'wmv' => 'video/x-ms-wmv',
-            'webm' => 'video/webm',
-        ];
-
-        return $mimeTypes[strtolower($extension)] ?? 'video/mp4';
+        return $this->materialVideo ? $this->materialVideo->stream_url : null;
     }
 }

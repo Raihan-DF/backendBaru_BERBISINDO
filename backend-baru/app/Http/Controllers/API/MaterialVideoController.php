@@ -127,32 +127,42 @@ class MaterialVideoController extends Controller
 
     public function show(Request $request, $materialId, $videoId)
     {
-        $material = Material::findOrFail($materialId);
-        $video = MaterialVideo::where('material_id', $materialId)
-            ->where('id', $videoId)
-            ->firstOrFail();
+        try {
+            $material = Material::findOrFail($materialId);
+            $video = MaterialVideo::where('material_id', $materialId)
+                ->where('id', $videoId)
+                ->firstOrFail();
 
-        // Check if material is published or user is the creator
-        if (!$material->is_published && $request->user()->id !== $material->created_by && !$request->user()->isTeacher()) {
-            return response()->json(['message' => 'Unauthorized'], 403);
+            // Check if material is published or user is the creator
+            if (!$material->is_published && $request->user()->id !== $material->created_by && !$request->user()->isTeacher()) {
+                return response()->json(['message' => 'Unauthorized'], 403);
+            }
+
+            // If user is a student, mark video as viewed
+            if ($request->user()->isStudent()) {
+                $progress = StudentProgress::firstOrCreate(
+                    [
+                        'user_id' => $request->user()->id,
+                        'material_id' => $materialId,
+                        'material_video_id' => $videoId,
+                        'progress_type' => 'material_video',
+                    ],
+                    [
+                        'is_completed' => false,
+                    ]
+                );
+            }
+
+            return response()->json($video);
+        } catch (\Exception $e) {
+            Log::error('Video show error: ' . $e->getMessage(), [
+                'materialId' => $materialId,
+                'videoId' => $videoId,
+                'file' => $e->getFile(),
+                'line' => $e->getLine()
+            ]);
+            return response()->json(['error' => 'Video not found'], 404);
         }
-
-        // If user is a student, mark video as viewed
-        if ($request->user()->isStudent()) {
-            $progress = StudentProgress::firstOrCreate(
-                [
-                    'user_id' => $request->user()->id,
-                    'material_id' => $materialId,
-                    'material_video_id' => $videoId,
-                    'progress_type' => 'material_video',
-                ],
-                [
-                    'is_completed' => false,
-                ]
-            );
-        }
-
-        return response()->json($video);
     }
 
     public function update(Request $request, $materialId, $videoId)
@@ -170,7 +180,7 @@ class MaterialVideoController extends Controller
         $validator = Validator::make($request->all(), [
             'title' => 'required|string|max:255',
             'description' => 'nullable|string',
-            'video' => 'nullable|file|mimes:mp4,mov,avi,wmv|max:200000', // 200MB max
+            'video' => 'nullable|file|max:200000', //|mimes:mp4,mov,avi,wmv
             'order' => 'nullable|integer|min:0',
         ]);
 
@@ -254,79 +264,77 @@ class MaterialVideoController extends Controller
 
     public function stream(Request $request, $materialId, $videoId)
     {
-        $material = Material::findOrFail($materialId);
-        $video = MaterialVideo::where('material_id', $materialId)
-            ->where('id', $videoId)
-            ->firstOrFail();
-
-        // Check if material is published or user is the creator
-        if (!$material->is_published && $request->user()->id !== $material->created_by && !$request->user()->isTeacher()) {
-            return response()->json(['message' => 'Unauthorized'], 403);
-        }
-
-        if (!$video->video_path || !Storage::disk(self::STORAGE_DISK)->exists($video->video_path)) {
-            return response()->json(['error' => 'Video not found'], 404);
-        }
-
-        $file = Storage::disk(self::STORAGE_DISK)->path($video->video_path);
-        $mimeType = $video->video_type ?: 'video/mp4';
-        $size = Storage::disk(self::STORAGE_DISK)->size($video->video_path);
-
-        $headers = [
-            'Content-Type' => $mimeType,
-            'Content-Length' => $size,
-            'Accept-Ranges' => 'bytes',
-            'Content-Disposition' => 'inline; filename="' . $video->video_filename . '"',
-        ];
-
-        // Handle range requests for video streaming
-        if ($request->header('Range')) {
-            return $this->handleRangeRequest($request, $file, $size, $mimeType);
-        }
-
-        return response()->file($file, $headers);
-    }
-
-    protected function handleRangeRequest(Request $request, $file, $size, $mimeType)
-    {
-        $range = $request->header('Range');
-        $ranges = explode('=', $range);
-        $ranges = explode('-', $ranges[1]);
-
-        $start = intval($ranges[0]);
-        $end = isset($ranges[1]) && !empty($ranges[1]) ? intval($ranges[1]) : $size - 1;
-
-        // Validate range
-        if ($start >= $size || $end >= $size) {
-            return response('Requested range not satisfiable', 416, [
-                'Content-Range' => "bytes */$size"
+        try {
+            Log::info('Stream request received', [
+                'materialId' => $materialId,
+                'videoId' => $videoId,
+                'user_id' => $request->user() ? $request->user()->id : 'guest',
+                'token' => $request->get('token') ? 'present' : 'missing'
             ]);
-        }
 
-        $length = $end - $start + 1;
-
-        $headers = [
-            'Content-Type' => $mimeType,
-            'Content-Length' => $length,
-            'Accept-Ranges' => 'bytes',
-            'Content-Range' => "bytes $start-$end/$size",
-        ];
-
-        return response()->stream(function () use ($file, $start, $end) {
-            $handle = fopen($file, 'rb');
-            fseek($handle, $start);
-            $buffer = 1024 * 8; // 8KB buffer
-            $currentPosition = $start;
-
-            while (!feof($handle) && $currentPosition <= $end) {
-                $bytesToRead = min($buffer, $end - $currentPosition + 1);
-                echo fread($handle, $bytesToRead);
-                flush();
-                $currentPosition += $bytesToRead;
+            // Get user from token if provided in query parameter
+            $user = $request->user();
+            if (!$user && $request->has('token')) {
+                // Try to get user from token in query parameter
+                $token = $request->get('token');
+                $user = \Laravel\Sanctum\PersonalAccessToken::findToken($token)?->tokenable;
             }
 
-            fclose($handle);
-        }, 206, $headers);
+            if (!$user) {
+                Log::warning('Stream access denied: No authenticated user');
+                return response()->json(['error' => 'Unauthorized'], 401);
+            }
+
+            $material = Material::findOrFail($materialId);
+            $video = MaterialVideo::where('material_id', $materialId)
+                ->where('id', $videoId)
+                ->firstOrFail();
+
+            Log::info('Video found', [
+                'video_id' => $video->id,
+                'video_path' => $video->video_path,
+                'video_filename' => $video->video_filename
+            ]);
+
+            // Check if material is published or user is the creator
+            if (!$material->is_published && $user->id !== $material->created_by && !$user->isTeacher()) {
+                Log::warning('Stream access denied: Material not published and user not authorized');
+                return response()->json(['error' => 'Unauthorized'], 403);
+            }
+
+            if (!$video->video_path) {
+                Log::error('Stream error: Video path is empty');
+                return response()->json(['error' => 'Video path not found'], 404);
+            }
+
+            if (!Storage::disk(self::STORAGE_DISK)->exists($video->video_path)) {
+                Log::error('Stream error: Video file does not exist', [
+                    'path' => $video->video_path,
+                    'full_path' => Storage::disk(self::STORAGE_DISK)->path($video->video_path)
+                ]);
+                return response()->json(['error' => 'Video file not found'], 404);
+            }
+
+            // **PERUBAHAN UTAMA: Redirect ke web route untuk better CORS handling**
+            $pathParts = explode('/', $video->video_path);
+            $materialIdFromPath = $pathParts[1] ?? $materialId;
+            $filename = $pathParts[2] ?? basename($video->video_path);
+
+            $redirectUrl = url("/storage/material_videos/{$materialIdFromPath}/{$filename}");
+            Log::info('Stream: Redirecting to web route', ['url' => $redirectUrl]);
+
+            return redirect($redirectUrl);
+
+        } catch (\Exception $e) {
+            Log::error('Stream error: ' . $e->getMessage(), [
+                'materialId' => $materialId,
+                'videoId' => $videoId,
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            return response()->json(['error' => 'Internal server error: ' . $e->getMessage()], 500);
+        }
     }
 
     public function markAsCompleted(Request $request, $materialId, $videoId)
